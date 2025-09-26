@@ -1,0 +1,14 @@
+# Build artifacts
+/target/
+
+# Dependency lock file (not committed)
+Cargo.lock
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Misc
+.trash/
