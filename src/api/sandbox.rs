@@ -172,22 +172,14 @@ impl SandboxBuilder {
             .or_else(|| sandbox.domain.clone())
             .unwrap_or_else(|| self.client.config().sandbox_domain());
 
-        let envd_host = if self.client.config().is_debug() {
-            format!("localhost:{}", ENVD_PORT)
-        } else {
-            format!(
-                "{}-{}.{}",
-                ENVD_PORT,
-                sandbox.sandbox_id,
-                sandbox_domain.as_str()
-            )
-        };
+        let envd_host = format!(
+            "{}-{}.{}",
+            ENVD_PORT,
+            sandbox.sandbox_id,
+            sandbox_domain.as_str()
+        );
 
-        let envd_scheme = if self.client.config().is_debug() {
-            "http"
-        } else {
-            "https"
-        };
+        let envd_scheme = "https";
 
         let envd_url = format!("{}://{}", envd_scheme, envd_host);
         tracing::debug!("Connecting to envd at: {}", envd_url);
@@ -278,16 +270,12 @@ impl SandboxBuilder {
                 sandbox.alias
             );
             const JUPYTER_PORT: u16 = 49_999;
-            let jupyter_host = if self.client.config().is_debug() {
-                format!("localhost:{}", JUPYTER_PORT)
-            } else {
-                format!(
-                    "{}-{}.{}",
-                    JUPYTER_PORT,
-                    sandbox.sandbox_id,
-                    sandbox_domain.as_str()
-                )
-            };
+            let jupyter_host = format!(
+                "{}-{}.{}",
+                JUPYTER_PORT,
+                sandbox.sandbox_id,
+                sandbox_domain.as_str()
+            );
             let jupyter_url = format!("{}://{}", envd_scheme, jupyter_host);
             let mut api = CodeInterpreterApi::new(self.client.clone(), jupyter_url.clone());
             if let Some(token) = access_token {

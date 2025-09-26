@@ -128,7 +128,6 @@ for entry in sandbox.logs().await?.into_iter().take(5) {
 
 ## Environment Tweaks
 
-- `E2B_DEBUG=true` – talk to a local API (`http://localhost:3000`) and skip metrics.
 - `E2B_SANDBOX_DOMAIN` – override the default `*.e2b.dev` envd domain if you run a custom deployment.
 
 ## Development Notes
