@@ -1,0 +1,65 @@
+[package]
+name = "e2b"
+version = "0.1.0"
+edition = "2021"
+authors = ["E2B Team"]
+description = "Rust SDK for E2B API - secure sandboxed code execution"
+license = "MIT"
+repository = "https://github.com/e2b-dev/e2b-rs"
+homepage = "https://e2b.dev"
+documentation = "https://docs.rs/e2b"
+keywords = ["e2b", "sandbox", "code-execution", "api", "async"]
+categories = ["api-bindings", "development-tools"]
+readme = "README.md"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+url = "2.5"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+tracing = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+bytes = "1.0"
+base64 = "0.22"
+http = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = "0.3"
+
+[lib]
+name = "e2b"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "sandbox"
+path = "examples/sandbox.rs"
+
+[[example]]
+name = "commands_demo"
+path = "examples/commands_demo.rs"
+
+[[example]]
+name = "filesystem_demo"
+path = "examples/filesystem_demo.rs"
+
+[[example]]
+name = "list_templates"
+path = "examples/list_templates.rs"
+
+[[example]]
+name = "create_nodejs_template"
+path = "examples/create_nodejs_template.rs"
+
+[[example]]
+name = "code_interpreter"
+path = "examples/code_interpreter.rs"
