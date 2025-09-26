@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -29,21 +30,75 @@ pub struct CommandOutput {
 #[derive(Debug)]
 pub struct CommandHandle {
     pub pid: u32,
-    stdout_receiver: Option<tokio::sync::mpsc::Receiver<CommandOutput>>,
-    stderr_receiver: Option<tokio::sync::mpsc::Receiver<CommandOutput>>,
+    stdout: Option<mpsc::Receiver<CommandOutput>>,
+    stderr: Option<mpsc::Receiver<CommandOutput>>,
+    result: Option<oneshot::Receiver<CommandResult>>,
 }
 
 impl CommandHandle {
-    pub fn new(pid: u32) -> Self {
+    pub fn new(
+        pid: u32,
+        stdout: mpsc::Receiver<CommandOutput>,
+        stderr: mpsc::Receiver<CommandOutput>,
+        result: oneshot::Receiver<CommandResult>,
+    ) -> Self {
         Self {
             pid,
-            stdout_receiver: None,
-            stderr_receiver: None,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            result: Some(result),
+        }
+    }
+
+    pub fn from_pid(pid: u32) -> Self {
+        Self {
+            pid,
+            stdout: None,
+            stderr: None,
+            result: None,
         }
     }
 
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    pub fn take_stdout(&mut self) -> Option<mpsc::Receiver<CommandOutput>> {
+        self.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<mpsc::Receiver<CommandOutput>> {
+        self.stderr.take()
+    }
+
+    pub fn take_result(&mut self) -> Option<oneshot::Receiver<CommandResult>> {
+        self.result.take()
+    }
+
+    pub fn on_stdout<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(CommandOutput) + Send + 'static,
+    {
+        if let Some(mut rx) = self.stdout.take() {
+            tokio::spawn(async move {
+                while let Some(item) = rx.recv().await {
+                    callback(item);
+                }
+            });
+        }
+    }
+
+    pub fn on_stderr<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(CommandOutput) + Send + 'static,
+    {
+        if let Some(mut rx) = self.stderr.take() {
+            tokio::spawn(async move {
+                while let Some(item) = rx.recv().await {
+                    callback(item);
+                }
+            });
+        }
     }
 }
 

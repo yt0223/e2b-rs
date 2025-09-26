@@ -5,20 +5,11 @@ use std::collections::HashMap;
 #[serde(tag = "type")]
 pub enum RpcMessage {
     #[serde(rename = "process_start")]
-    ProcessStart {
-        id: String,
-        config: ProcessConfig,
-    },
+    ProcessStart { id: String, config: ProcessConfig },
     #[serde(rename = "process_output")]
-    ProcessOutput {
-        pid: u32,
-        output: ProcessOutputData,
-    },
+    ProcessOutput { pid: u32, output: ProcessOutputData },
     #[serde(rename = "process_exit")]
-    ProcessExit {
-        pid: u32,
-        exit_code: i32,
-    },
+    ProcessExit { pid: u32, exit_code: i32 },
     #[serde(rename = "filesystem_event")]
     FilesystemEvent {
         path: String,
@@ -26,10 +17,7 @@ pub enum RpcMessage {
         timestamp: String,
     },
     #[serde(rename = "error")]
-    Error {
-        message: String,
-        code: Option<i32>,
-    },
+    Error { message: String, code: Option<i32> },
     #[serde(rename = "ping")]
     Ping,
     #[serde(rename = "pong")]

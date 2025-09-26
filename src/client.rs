@@ -30,7 +30,10 @@ impl Client {
         let api_key_header = header::HeaderValue::from_str(&config.api_key)
             .map_err(|_| Error::Configuration("Invalid API key format".to_string()))?;
         headers.insert("X-API-Key", api_key_header);
-        headers.insert(header::USER_AGENT, header::HeaderValue::from_static("e2b-rust-sdk/0.1.0"));
+        headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static("e2b-rust-sdk/0.1.0"),
+        );
 
         let http = HttpClient::builder()
             .default_headers(headers)

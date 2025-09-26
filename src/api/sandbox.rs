@@ -1,13 +1,15 @@
 use crate::{
-    api::{CommandsApi, FilesystemApi, CodeInterpreterApi},
+    api::{CodeInterpreterApi, CommandsApi, FilesystemApi},
     client::Client,
     error::{Error, Result},
     models::{
-        CodeExecution, Sandbox, SandboxCreateRequest, SandboxLog, SandboxMetrics, Execution,
+        CodeExecution, Execution, LogLevel, Sandbox, SandboxCreateRequest, SandboxLog,
+        SandboxMetrics,
     },
 };
+use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -67,23 +69,20 @@ impl SandboxApi {
 
     async fn create_sandbox(&self, request: SandboxCreateRequest) -> Result<Sandbox> {
         let url = self.client.build_url("/sandboxes");
-        let response = self
-            .client
-            .http()
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.client.http().post(&url).json(&request).send().await?;
 
         match response.status() {
             StatusCode::CREATED | StatusCode::OK => {
                 let response_text = response.text().await?;
                 tracing::debug!("Sandbox creation response: {}", response_text);
 
-                let sandbox: Sandbox = serde_json::from_str(&response_text)
-                    .map_err(|e| Error::Api {
+                let sandbox: Sandbox =
+                    serde_json::from_str(&response_text).map_err(|e| Error::Api {
                         status: 500,
-                        message: format!("Failed to parse sandbox response: {}. Response: {}", e, response_text),
+                        message: format!(
+                            "Failed to parse sandbox response: {}. Response: {}",
+                            e, response_text
+                        ),
                     })?;
                 Ok(sandbox)
             }
@@ -166,12 +165,44 @@ impl SandboxBuilder {
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         // Initialize Commands and Filesystem APIs with HTTP Connect protocol
-        // Based on Python SDK: envd_port = 49983, uses HTTP Connect not WebSocket
-        let envd_url = format!("https://49983-{}.e2b.dev", sandbox.sandbox_id);
-        tracing::debug!("Connecting to envd at: {}", envd_url);
+        const ENVD_PORT: u16 = 49_983;
+        let sandbox_domain = sandbox
+            .sandbox_domain
+            .clone()
+            .or_else(|| sandbox.domain.clone())
+            .unwrap_or_else(|| self.client.config().sandbox_domain());
 
-        let mut commands = CommandsApi::new(self.client.clone(), sandbox.sandbox_id.clone());
-        let mut files = FilesystemApi::new(self.client.clone(), sandbox.sandbox_id.clone());
+        let envd_host = if self.client.config().is_debug() {
+            format!("localhost:{}", ENVD_PORT)
+        } else {
+            format!(
+                "{}-{}.{}",
+                ENVD_PORT,
+                sandbox.sandbox_id,
+                sandbox_domain.as_str()
+            )
+        };
+
+        let envd_scheme = if self.client.config().is_debug() {
+            "http"
+        } else {
+            "https"
+        };
+
+        let envd_url = format!("{}://{}", envd_scheme, envd_host);
+        tracing::debug!("Connecting to envd at: {}", envd_url);
+        let access_token = sandbox.envd_access_token.as_deref();
+        tracing::info!(
+            sandbox_id = %sandbox.sandbox_id,
+            envd_url = %envd_url,
+            domain = ?sandbox.domain,
+            sandbox_domain = ?sandbox.sandbox_domain,
+            has_access_token = access_token.is_some(),
+            "Configured sandbox envd endpoint"
+        );
+
+        let mut commands = CommandsApi::new();
+        let mut files = FilesystemApi::new();
 
         // Try to initialize RPC with retries
         let mut retry_count = 0;
@@ -179,7 +210,7 @@ impl SandboxBuilder {
         const RETRY_DELAY: Duration = Duration::from_secs(2);
 
         while retry_count < MAX_RETRIES {
-            match commands.init_rpc(&envd_url).await {
+            match commands.init_rpc(&envd_url, access_token).await {
                 Ok(()) => {
                     tracing::debug!("Commands RPC connected successfully");
                     break;
@@ -191,7 +222,12 @@ impl SandboxBuilder {
                         // Don't fail sandbox creation, just make commands unavailable
                         break;
                     }
-                    tracing::warn!("Commands RPC connection failed (attempt {}/{}): {}", retry_count, MAX_RETRIES, e);
+                    tracing::warn!(
+                        "Commands RPC connection failed (attempt {}/{}): {}",
+                        retry_count,
+                        MAX_RETRIES,
+                        e
+                    );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
@@ -200,7 +236,7 @@ impl SandboxBuilder {
         // Initialize filesystem RPC with same URL
         retry_count = 0;
         while retry_count < MAX_RETRIES {
-            match files.init_rpc(&envd_url).await {
+            match files.init_rpc(&envd_url, access_token).await {
                 Ok(()) => {
                     tracing::debug!("Filesystem RPC connected successfully");
                     break;
@@ -212,21 +248,57 @@ impl SandboxBuilder {
                         // Don't fail sandbox creation, just make filesystem unavailable
                         break;
                     }
-                    tracing::warn!("Filesystem RPC connection failed (attempt {}/{}): {}", retry_count, MAX_RETRIES, e);
+                    tracing::warn!(
+                        "Filesystem RPC connection failed (attempt {}/{}): {}",
+                        retry_count,
+                        MAX_RETRIES,
+                        e
+                    );
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
         }
 
         // Initialize code interpreter if using the code-interpreter template
-        tracing::debug!("Template ID: {}, Template Alias: {:?}", sandbox.template_id, sandbox.alias);
-        let is_code_interpreter = sandbox.template_id.contains("code-interpreter") ||
-            sandbox.alias.as_ref().map_or(false, |alias| alias.contains("code-interpreter"));
+        tracing::debug!(
+            "Template ID: {}, Template Alias: {:?}",
+            sandbox.template_id,
+            sandbox.alias
+        );
+        let is_code_interpreter = sandbox.template_id.contains("code-interpreter")
+            || sandbox
+                .alias
+                .as_ref()
+                .map_or(false, |alias| alias.contains("code-interpreter"));
 
         let code_interpreter = if is_code_interpreter {
-            tracing::debug!("Initializing code interpreter for template: {} (alias: {:?})", sandbox.template_id, sandbox.alias);
-            let jupyter_url = format!("https://49999-{}.e2b.dev", sandbox.sandbox_id);
-            Some(CodeInterpreterApi::new(self.client.clone(), sandbox.sandbox_id.clone(), jupyter_url))
+            tracing::debug!(
+                "Initializing code interpreter for template: {} (alias: {:?})",
+                sandbox.template_id,
+                sandbox.alias
+            );
+            const JUPYTER_PORT: u16 = 49_999;
+            let jupyter_host = if self.client.config().is_debug() {
+                format!("localhost:{}", JUPYTER_PORT)
+            } else {
+                format!(
+                    "{}-{}.{}",
+                    JUPYTER_PORT,
+                    sandbox.sandbox_id,
+                    sandbox_domain.as_str()
+                )
+            };
+            let jupyter_url = format!("{}://{}", envd_scheme, jupyter_host);
+            let mut api = CodeInterpreterApi::new(self.client.clone(), jupyter_url.clone());
+            if let Some(token) = access_token {
+                api.set_envd_access_token(token.to_string());
+            }
+            tracing::info!(
+                sandbox_id = %sandbox.sandbox_id,
+                jupyter_url = %jupyter_url,
+                "Configured code interpreter endpoint"
+            );
+            Some(api)
         } else {
             tracing::debug!("Code interpreter not initialized - neither template_id nor alias contains 'code-interpreter'");
             None
@@ -272,7 +344,8 @@ impl SandboxInstance {
     }
 
     pub async fn run_code(&self, code: &str) -> Result<CodeExecution> {
-        self.run_code_with_timeout(code, Duration::from_secs(30)).await
+        self.run_code_with_timeout(code, Duration::from_secs(30))
+            .await
     }
 
     pub async fn run_code_with_language(&self, code: &str, language: &str) -> Result<Execution> {
@@ -297,8 +370,15 @@ impl SandboxInstance {
         self.run_code_with_language(code, "javascript").await
     }
 
-    pub async fn run_code_with_timeout(&self, code: &str, timeout_duration: Duration) -> Result<CodeExecution> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}/code", self.sandbox.sandbox_id));
+    pub async fn run_code_with_timeout(
+        &self,
+        code: &str,
+        timeout_duration: Duration,
+    ) -> Result<CodeExecution> {
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}/code", self.sandbox.sandbox_id));
 
         let request_body = serde_json::json!({
             "code": code
@@ -319,7 +399,10 @@ impl SandboxInstance {
                     let execution: CodeExecution = response.json().await?;
                     Ok(execution)
                 }
-                StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
+                StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                    "Sandbox {}",
+                    self.sandbox.sandbox_id
+                ))),
                 status => {
                     let error_text = response.text().await.unwrap_or_default();
                     Err(Error::Api {
@@ -336,46 +419,80 @@ impl SandboxInstance {
     }
 
     pub async fn pause(&self) -> Result<()> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}/pause", self.sandbox.sandbox_id));
-        let response = self.api.client.http().post(&url).send().await?;
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}/pause", self.sandbox.sandbox_id));
+        let response = self
+            .api
+            .client
+            .http()
+            .post(&url)
+            .json(&json!({}))
+            .send()
+            .await?;
 
-        match response.status() {
-            StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
-            status => {
-                let error_text = response.text().await.unwrap_or_default();
-                Err(Error::Api {
-                    status: status.as_u16(),
-                    message: error_text,
-                })
-            }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::debug!("pause response status={} body={}", status, body);
+
+        match status {
+            StatusCode::OK | StatusCode::NO_CONTENT | StatusCode::CREATED => Ok(()),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Sandbox {}",
+                self.sandbox.sandbox_id
+            ))),
+            _ => Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            }),
         }
     }
 
     pub async fn resume(&self) -> Result<()> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}/resume", self.sandbox.sandbox_id));
-        let response = self.api.client.http().post(&url).send().await?;
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}/resume", self.sandbox.sandbox_id));
+        let response = self
+            .api
+            .client
+            .http()
+            .post(&url)
+            .json(&json!({}))
+            .send()
+            .await?;
 
-        match response.status() {
-            StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
-            status => {
-                let error_text = response.text().await.unwrap_or_default();
-                Err(Error::Api {
-                    status: status.as_u16(),
-                    message: error_text,
-                })
-            }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::debug!("resume response status={} body={}", status, body);
+
+        match status {
+            StatusCode::OK | StatusCode::NO_CONTENT | StatusCode::CREATED => Ok(()),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Sandbox {}",
+                self.sandbox.sandbox_id
+            ))),
+            _ => Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            }),
         }
     }
 
     pub async fn delete(self) -> Result<()> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}", self.sandbox.sandbox_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}", self.sandbox.sandbox_id));
         let response = self.api.client.http().delete(&url).send().await?;
 
         match response.status() {
             StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Sandbox {}",
+                self.sandbox.sandbox_id
+            ))),
             status => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(Error::Api {
@@ -387,47 +504,178 @@ impl SandboxInstance {
     }
 
     pub async fn logs(&self) -> Result<Vec<SandboxLog>> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}/logs", self.sandbox.sandbox_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}/logs", self.sandbox.sandbox_id));
         let response = self.api.client.http().get(&url).send().await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::debug!("sandbox logs response: {}", body);
 
-        match response.status() {
-            StatusCode::OK => {
-                let logs: Vec<SandboxLog> = response.json().await?;
-                Ok(logs)
-            }
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
-            status => {
-                let error_text = response.text().await.unwrap_or_default();
-                Err(Error::Api {
-                    status: status.as_u16(),
-                    message: error_text,
-                })
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let value: Value = serde_json::from_str(&body).map_err(|e| Error::Api {
+            status: 500,
+            message: format!("Failed to parse logs response: {}", e),
+        })?;
+
+        let mut entries = Vec::new();
+
+        if let Some(arr) = value.get("logEntries").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Ok(log) = Self::parse_structured_log(item) {
+                    entries.push(log);
+                }
             }
         }
+
+        if let Some(arr) = value.get("logs").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Ok(log) = Self::parse_line_log(item) {
+                    entries.push(log);
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            return Err(Error::Api {
+                status: 500,
+                message: "No log entries returned".to_string(),
+            });
+        }
+
+        Ok(entries)
     }
 
     pub async fn metrics(&self) -> Result<SandboxMetrics> {
-        let url = self.api.client.build_url(&format!("/sandboxes/{}/metrics", self.sandbox.sandbox_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/sandboxes/{}/metrics", self.sandbox.sandbox_id));
         let response = self.api.client.http().get(&url).send().await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::debug!("sandbox metrics response: {}", body);
 
-        match response.status() {
-            StatusCode::OK => {
-                let metrics: SandboxMetrics = response.json().await?;
-                Ok(metrics)
-            }
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Sandbox {}", self.sandbox.sandbox_id))),
-            status => {
-                let error_text = response.text().await.unwrap_or_default();
-                Err(Error::Api {
-                    status: status.as_u16(),
-                    message: error_text,
-                })
-            }
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            });
         }
+
+        let value: Value = serde_json::from_str(&body).map_err(|e| Error::Api {
+            status: 500,
+            message: format!("Failed to parse metrics response: {}", e),
+        })?;
+
+        if let Some(array) = value.as_array() {
+            if let Some(first) = array.first() {
+                return Self::parse_metrics(first);
+            }
+            return Ok(SandboxMetrics::default());
+        }
+
+        Self::parse_metrics(&value)
     }
 
     pub async fn refresh(&mut self) -> Result<()> {
         self.sandbox = self.api.get(&self.sandbox.sandbox_id).await?;
         Ok(())
+    }
+
+    fn parse_metrics(value: &Value) -> Result<SandboxMetrics> {
+        let obj = value.as_object().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Invalid metrics format".to_string(),
+        })?;
+
+        Ok(SandboxMetrics {
+            cpu_count: obj.get("cpuCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            cpu_used_pct: obj
+                .get("cpuUsedPct")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            disk_total: obj.get("diskTotal").and_then(|v| v.as_u64()).unwrap_or(0),
+            disk_used: obj.get("diskUsed").and_then(|v| v.as_u64()).unwrap_or(0),
+            mem_total: obj.get("memTotal").and_then(|v| v.as_u64()).unwrap_or(0),
+            mem_used: obj.get("memUsed").and_then(|v| v.as_u64()).unwrap_or(0),
+            timestamp: Self::parse_timestamp(obj.get("timestamp")),
+        })
+    }
+
+    fn parse_structured_log(value: &Value) -> Result<SandboxLog> {
+        let obj = value.as_object().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Invalid log entry format".to_string(),
+        })?;
+
+        let level = obj.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+
+        let message = obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let timestamp = Self::parse_timestamp(obj.get("timestamp"));
+
+        let fields = obj.get("fields").and_then(|v| v.as_object());
+        let source = fields
+            .and_then(|m| m.get("service").and_then(|v| v.as_str()))
+            .or_else(|| fields.and_then(|m| m.get("logger").and_then(|v| v.as_str())))
+            .unwrap_or("unknown")
+            .to_string();
+
+        Ok(SandboxLog {
+            timestamp,
+            level: Self::parse_log_level(level),
+            message,
+            source,
+        })
+    }
+
+    fn parse_line_log(value: &Value) -> Result<SandboxLog> {
+        let line = value.get("line").and_then(|v| v.as_str()).unwrap_or("");
+        let timestamp = Self::parse_timestamp(value.get("timestamp"));
+
+        if let Ok(parsed) = serde_json::from_str::<Value>(line) {
+            if let Ok(mut log) = Self::parse_structured_log(&parsed) {
+                log.timestamp = timestamp;
+                return Ok(log);
+            }
+        }
+
+        Ok(SandboxLog {
+            timestamp,
+            level: LogLevel::Info,
+            message: line.to_string(),
+            source: "log".to_string(),
+        })
+    }
+
+    fn parse_log_level(level: &str) -> LogLevel {
+        match level.to_lowercase().as_str() {
+            "debug" => LogLevel::Debug,
+            "info" => LogLevel::Info,
+            "warn" | "warning" => LogLevel::Warn,
+            "error" => LogLevel::Error,
+            _ => LogLevel::Info,
+        }
+    }
+
+    fn parse_timestamp(value: Option<&Value>) -> DateTime<Utc> {
+        if let Some(Value::String(s)) = value {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                return dt.with_timezone(&Utc);
+            }
+        }
+        Utc::now()
     }
 }

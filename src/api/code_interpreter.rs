@@ -1,29 +1,24 @@
 use crate::{
     client::Client,
     error::{Error, Result as ApiResult},
-    models::{Execution, CodeExecutionRequest, CodeInterpreterOptions, Context},
+    models::{CodeExecutionRequest, CodeInterpreterOptions, Context, Execution},
 };
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 
-const DEFAULT_TEMPLATE: &str = "code-interpreter-v1";
-const JUPYTER_PORT: u16 = 49999;
-
 #[derive(Clone)]
 pub struct CodeInterpreterApi {
     client: Client,
-    sandbox_id: String,
     jupyter_url: String,
     envd_access_token: Option<String>,
 }
 
 impl CodeInterpreterApi {
-    pub fn new(client: Client, sandbox_id: String, jupyter_url: String) -> Self {
+    pub fn new(client: Client, jupyter_url: String) -> Self {
         Self {
             client,
-            sandbox_id,
             jupyter_url,
             envd_access_token: None,
         }
@@ -46,7 +41,11 @@ impl CodeInterpreterApi {
         self.run_code_with_options(code, &options).await
     }
 
-    pub async fn run_code_with_options(&self, code: &str, options: &CodeInterpreterOptions) -> ApiResult<Execution> {
+    pub async fn run_code_with_options(
+        &self,
+        code: &str,
+        options: &CodeInterpreterOptions,
+    ) -> ApiResult<Execution> {
         let request = CodeExecutionRequest {
             code: code.to_string(),
             language: options.language.clone(),
@@ -58,10 +57,7 @@ impl CodeInterpreterApi {
 
         let request_future = async {
             let url = format!("{}/execute", self.jupyter_url);
-            let mut request_builder = self.client
-                .http()
-                .post(&url)
-                .json(&request);
+            let mut request_builder = self.client.http().post(&url).json(&request);
 
             if let Some(token) = &self.envd_access_token {
                 request_builder = request_builder.header("X-Access-Token", token);
@@ -75,9 +71,10 @@ impl CodeInterpreterApi {
                     tracing::debug!("Jupyter response: {}", text);
                     self.parse_jupyter_response(&text).await
                 }
-                StatusCode::NOT_FOUND => {
-                    Err(Error::NotFound(format!("Jupyter server not found at {}", url)))
-                }
+                StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                    "Jupyter server not found at {}",
+                    url
+                ))),
                 status => {
                     let error_text = response.text().await.unwrap_or_default();
                     Err(Error::Api {
@@ -115,7 +112,10 @@ impl CodeInterpreterApi {
             tracing::debug!("Line {}: {}", i, line);
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(json) => {
-                    tracing::debug!("Parsed JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    tracing::debug!(
+                        "Parsed JSON keys: {:?}",
+                        json.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    );
 
                     // Check for different possible response formats
                     if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
@@ -124,10 +124,12 @@ impl CodeInterpreterApi {
                             "stdout" => {
                                 if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
                                     execution.stdout.push_str(text);
-                                } else if let Some(data) = json.get("line").and_then(|l| l.as_str()) {
+                                } else if let Some(data) = json.get("line").and_then(|l| l.as_str())
+                                {
                                     execution.stdout.push_str(data);
                                     execution.stdout.push('\n');
-                                } else if let Some(data) = json.get("data").and_then(|l| l.as_str()) {
+                                } else if let Some(data) = json.get("data").and_then(|l| l.as_str())
+                                {
                                     execution.stdout.push_str(data);
                                     execution.stdout.push('\n');
                                 }
@@ -135,10 +137,12 @@ impl CodeInterpreterApi {
                             "stderr" => {
                                 if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
                                     execution.stderr.push_str(text);
-                                } else if let Some(data) = json.get("line").and_then(|l| l.as_str()) {
+                                } else if let Some(data) = json.get("line").and_then(|l| l.as_str())
+                                {
                                     execution.stderr.push_str(data);
                                     execution.stderr.push('\n');
-                                } else if let Some(data) = json.get("data").and_then(|l| l.as_str()) {
+                                } else if let Some(data) = json.get("data").and_then(|l| l.as_str())
+                                {
                                     execution.stderr.push_str(data);
                                     execution.stderr.push('\n');
                                 }
@@ -163,26 +167,32 @@ impl CodeInterpreterApi {
                                 }
 
                                 if !result_data.is_empty() {
-                                    execution.results.push(crate::models::code_interpreter::Result {
-                                        result_type: msg_type.to_string(),
-                                        data: result_data,
-                                    });
-                                    execution.is_main_result = json.get("is_main_result")
+                                    execution.results.push(
+                                        crate::models::code_interpreter::Result {
+                                            result_type: msg_type.to_string(),
+                                            data: result_data,
+                                        },
+                                    );
+                                    execution.is_main_result = json
+                                        .get("is_main_result")
                                         .and_then(|v| v.as_bool())
                                         .unwrap_or(true);
                                 }
                             }
                             "error" => {
                                 execution.error = Some(crate::models::ExecutionError {
-                                    name: json.get("name")
+                                    name: json
+                                        .get("name")
                                         .and_then(|n| n.as_str())
                                         .unwrap_or("Unknown")
                                         .to_string(),
-                                    value: json.get("value")
+                                    value: json
+                                        .get("value")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("")
                                         .to_string(),
-                                    traceback: json.get("traceback")
+                                    traceback: json
+                                        .get("traceback")
                                         .and_then(|t| t.as_str())
                                         .unwrap_or("")
                                         .to_string(),
@@ -212,12 +222,21 @@ impl CodeInterpreterApi {
             }
         }
 
-        tracing::debug!("Final execution result - stdout: '{}', stderr: '{}', results: {}, error: {:?}",
-            execution.stdout, execution.stderr, execution.results.len(), execution.error.is_some());
+        tracing::debug!(
+            "Final execution result - stdout: '{}', stderr: '{}', results: {}, error: {:?}",
+            execution.stdout,
+            execution.stderr,
+            execution.results.len(),
+            execution.error.is_some()
+        );
         Ok(execution)
     }
 
-    pub async fn create_context(&self, language: Option<&str>, cwd: Option<&str>) -> ApiResult<Context> {
+    pub async fn create_context(
+        &self,
+        language: Option<&str>,
+        cwd: Option<&str>,
+    ) -> ApiResult<Context> {
         let mut request_data = HashMap::new();
         if let Some(lang) = language {
             request_data.insert("language", lang);
@@ -227,10 +246,7 @@ impl CodeInterpreterApi {
         }
 
         let url = format!("{}/contexts", self.jupyter_url);
-        let mut request_builder = self.client
-            .http()
-            .post(&url)
-            .json(&request_data);
+        let mut request_builder = self.client.http().post(&url).json(&request_data);
 
         if let Some(token) = &self.envd_access_token {
             request_builder = request_builder.header("X-Access-Token", token);
@@ -255,9 +271,7 @@ impl CodeInterpreterApi {
 
     pub async fn list_contexts(&self) -> ApiResult<Vec<Context>> {
         let url = format!("{}/contexts", self.jupyter_url);
-        let mut request_builder = self.client
-            .http()
-            .get(&url);
+        let mut request_builder = self.client.http().get(&url);
 
         if let Some(token) = &self.envd_access_token {
             request_builder = request_builder.header("X-Access-Token", token);

@@ -17,10 +17,7 @@ pub enum Error {
     ApiKeyNotFound,
 
     #[error("API error ({status}): {message}")]
-    Api {
-        status: u16,
-        message: String,
-    },
+    Api { status: u16, message: String },
 
     #[error("Authentication failed: {0}")]
     Authentication(String),

@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
     println!("Creating sandbox with code interpreter...");
     let sandbox = client
         .sandbox()
-        .template("code-interpreter-v1")  // Required for multi-language support
+        .template("code-interpreter-v1") // Required for multi-language support
         .metadata(json!({
             "example": "code_interpreter",
             "languages": "python,javascript"
@@ -24,7 +24,9 @@ async fn main() -> Result<()> {
 
     // 1. Python Data Science Example
     println!("1. 🐍 Python Data Science Example");
-    let python_result = sandbox.run_python(r#"
+    let python_result = sandbox
+        .run_python(
+            r#"
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -54,19 +56,24 @@ category_means = df.groupby('category')[['x', 'y']].mean()
 print(f"\n📋 Category means:\n{category_means}")
 
 "Analysis complete!"
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("Python Output:");
     println!("{}", python_result.stdout);
     if !python_result.stderr.is_empty() {
         println!("Warnings: {}", python_result.stderr);
     }
+    assert!(python_result.stdout.contains("Dataset created"));
+    assert!(python_result.error.is_none());
 
     // 2. JavaScript Web Development Example
     println!("\n2. 🟨 JavaScript Web Development Example");
-    let js_result = sandbox.run_javascript(r#"
+    let js_result = sandbox
+        .run_javascript(
+            r#"
 // Simulate a simple web API
-const express = require('express');
 const fs = require('fs');
 
 // Create mock user data
@@ -114,19 +121,29 @@ fs.writeFileSync('/tmp/api_config.json', JSON.stringify(configData, null, 2));
 console.log('\n💾 Configuration saved to /tmp/api_config.json');
 
 console.log(`\n🚀 Node.js ${process.version} - API simulation complete!`);
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("JavaScript Output:");
     println!("{}", js_result.stdout);
     if !js_result.stderr.is_empty() {
         println!("Errors: {}", js_result.stderr);
     }
+    if !js_result.stdout.contains("Mock Users Database")
+        || !js_result.stdout.contains("Configuration saved")
+    {
+        println!("⚠️ Unexpected JS stdout, got: {}", js_result.stdout.trim());
+    }
+    assert!(js_result.error.is_none());
 
     // 3. Cross-language data sharing
     println!("\n3. 🔄 Cross-language Data Sharing");
 
     // Python writes data
-    let py_write = sandbox.run_python(r#"
+    let py_write = sandbox
+        .run_python(
+            r#"
 import json
 
 # Python generates data
@@ -147,13 +164,18 @@ with open('/tmp/analysis_results.json', 'w') as f:
 
 print("✅ Python: Analysis results saved to /tmp/analysis_results.json")
 print(f"Model accuracy: {analysis_results['accuracy']}")
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("Python data generation:");
     println!("{}", py_write.stdout);
+    assert!(py_write.stdout.contains("Analysis results saved"));
 
     // JavaScript reads and processes the data
-    let js_read = sandbox.run_javascript(r#"
+    let js_read = sandbox
+        .run_javascript(
+            r#"
 const fs = require('fs');
 
 // Read data created by Python
@@ -180,35 +202,55 @@ const processedData = {
 fs.writeFileSync('/tmp/final_report.json', JSON.stringify(processedData, null, 2));
 console.log('\n✅ JavaScript: Enhanced report saved to /tmp/final_report.json');
 console.log(`Performance Grade: ${processedData.performance_grade}`);
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("JavaScript data processing:");
     println!("{}", js_read.stdout);
+    if !js_read.stdout.contains("Enhanced report saved") {
+        println!(
+            "⚠️ Unexpected JS read stdout, got: {}",
+            js_read.stdout.trim()
+        );
+    }
+    if let Some(error) = &js_read.error {
+        println!("⚠️ JavaScript reported error: {:#?}", error);
+    }
 
     // 4. Error handling demonstration
     println!("\n4. ⚠️  Error Handling Examples");
 
-    let python_error = sandbox.run_python(r#"
+    let python_error = sandbox
+        .run_python(
+            r#"
 print("This will run successfully")
 raise ValueError("This is a deliberate error for demonstration")
 print("This line will not be reached")
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("Python error handling:");
     println!("Stdout: {}", python_error.stdout);
-    if let Some(error) = python_error.error {
+    if let Some(ref error) = python_error.error {
         println!("Error Type: {}", error.name);
         println!("Error Message: {}", error.value);
         println!("Traceback Available: {}", !error.traceback.is_empty());
     }
+    assert!(python_error.error.is_some());
 
     // 5. Language parameter demonstration
     println!("\n5. 🔧 Using Language Parameters");
-    let param_result = sandbox.run_code_with_language(
-        "console.log('This JavaScript code was executed using the language parameter');",
-        "javascript"
-    ).await?;
+    let param_result = sandbox
+        .run_code_with_language(
+            "console.log('This JavaScript code was executed using the language parameter');",
+            "javascript",
+        )
+        .await?;
     println!("Language parameter result: {}", param_result.stdout);
+    assert!(param_result.stdout.contains("language parameter"));
+    assert!(param_result.error.is_none());
 
     println!("\n🧹 Cleaning up...");
     sandbox.delete().await?;

@@ -1,16 +1,28 @@
 use e2b::prelude::*;
 use serde_json::json;
 use std::time::Duration;
+use tracing_subscriber;
+
+fn bytes_to_mb(value: u64) -> f64 {
+    value as f64 / (1024.0 * 1024.0)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
+
     let client = Client::new()?;
 
     println!("Listing all sandboxes...");
     let sandboxes = client.sandbox().list().await?;
     println!("Found {} existing sandboxes", sandboxes.len());
     for sb in &sandboxes {
-        println!("- {}: {} ({})", sb.sandbox_id, sb.template_id, if sb.is_live { "live" } else { "stopped" });
+        println!(
+            "- {}: {} ({})",
+            sb.sandbox_id,
+            sb.template_id,
+            if sb.is_live { "live" } else { "stopped" }
+        );
     }
 
     println!("\nCreating new sandbox with environment variables...");
@@ -20,7 +32,7 @@ async fn main() -> Result<()> {
 
     let sandbox = client
         .sandbox()
-        .template("code-interpreter-v1")  // Use the code interpreter template
+        .template("code-interpreter-v1") // Use the code interpreter template
         .metadata(json!({
             "project": "e2b-rust-sdk-demo",
             "created_by": "rust-example"
@@ -37,43 +49,78 @@ async fn main() -> Result<()> {
     println!("Memory: {} MB", sandbox.sandbox().memory_mb);
 
     println!("\nTesting Python code execution...");
-    let python_result = sandbox.run_python("print('Hello from Python!'); import sys; print(f'Python version: {sys.version}')").await?;
+    let python_result = sandbox
+        .run_python(
+            "print('Hello from Python!'); import sys; print(f'Python version: {sys.version}')",
+        )
+        .await?;
     println!("Python output:\n{}", python_result.stdout);
     if !python_result.stderr.is_empty() {
         println!("Python stderr:\n{}", python_result.stderr);
     }
+    assert!(python_result.stdout.contains("Hello from Python!"));
+    assert!(python_result.error.is_none());
 
     println!("\nTesting JavaScript code execution...");
-    let js_result = sandbox.run_javascript("console.log('Hello from JavaScript!'); console.log('Node version:', process.version)").await?;
+    let js_result = sandbox
+        .run_javascript(
+            "console.log('Hello from JavaScript!'); console.log('Node version:', process.version)",
+        )
+        .await?;
     println!("JavaScript output:\n{}", js_result.stdout);
     if !js_result.stderr.is_empty() {
         println!("JavaScript stderr:\n{}", js_result.stderr);
     }
+    assert!(js_result.stdout.contains("Hello from JavaScript!"));
+    assert!(js_result.error.is_none());
 
     println!("\nTesting environment variables with JavaScript...");
     let env_result = sandbox.run_javascript("console.log('NODE_ENV:', process.env.NODE_ENV); console.log('DEBUG:', process.env.DEBUG)").await?;
     println!("Environment test output:\n{}", env_result.stdout);
+    assert!(env_result.stdout.contains("NODE_ENV:"));
+    assert!(env_result.stdout.contains("DEBUG:"));
 
     println!("\nTesting error handling with Python...");
-    let error_result = sandbox.run_python("raise Exception('Test error from Python'); print('This should not run')").await?;
+    let error_result = sandbox
+        .run_python("raise Exception('Test error from Python'); print('This should not run')")
+        .await?;
     if let Some(error) = &error_result.error {
         println!("Python error - Name: {}", error.name);
         println!("Python error - Value: {}", error.value);
     }
+    assert!(error_result.error.is_some());
 
     println!("\nTesting long-running code with timeout...");
-    match sandbox.run_code_with_timeout("setTimeout(() => console.log('Done!'), 100); 'Started'", Duration::from_millis(50)).await {
-        Ok(result) => println!("Unexpected success: {}", result.stdout),
+    let timeout_result = sandbox
+        .run_code_with_timeout(
+            "setTimeout(() => console.log('Done!'), 100); 'Started'",
+            Duration::from_millis(50),
+        )
+        .await;
+    match timeout_result {
         Err(Error::Timeout) => println!("Correctly timed out as expected"),
-        Err(e) => println!("Unexpected error: {}", e),
+        Ok(result) => {
+            println!("Unexpected success: {}", result.stdout);
+            panic!("Expected timeout but command completed successfully");
+        }
+        Err(e) => panic!("Unexpected error: {}", e),
     }
 
     println!("\nGetting sandbox metrics...");
     match sandbox.metrics().await {
         Ok(metrics) => {
-            println!("CPU Usage: {:.2}%", metrics.cpu_usage_percent);
-            println!("Memory Usage: {} MB / {} MB", metrics.memory_usage_mb, metrics.memory_limit_mb);
-            println!("Disk Usage: {} MB / {} MB", metrics.disk_usage_mb, metrics.disk_limit_mb);
+            println!("CPU Count: {}", metrics.cpu_count);
+            println!("CPU Used: {:.2}%", metrics.cpu_used_pct);
+            println!(
+                "Memory Usage: {:.2} / {:.2} MB",
+                bytes_to_mb(metrics.mem_used),
+                bytes_to_mb(metrics.mem_total)
+            );
+            println!(
+                "Disk Usage: {:.2} / {:.2} MB",
+                bytes_to_mb(metrics.disk_used),
+                bytes_to_mb(metrics.disk_total)
+            );
         }
         Err(e) => println!("Failed to get metrics: {}", e),
     }
@@ -83,7 +130,13 @@ async fn main() -> Result<()> {
         Ok(logs) => {
             println!("Found {} log entries", logs.len());
             for (i, log) in logs.iter().take(5).enumerate() {
-                println!("  {}: [{:?}] {} - {}", i + 1, log.level, log.source, log.message);
+                println!(
+                    "  {}: [{:?}] {} - {}",
+                    i + 1,
+                    log.level,
+                    log.source,
+                    log.message
+                );
             }
             if logs.len() > 5 {
                 println!("  ... and {} more", logs.len() - 5);
@@ -102,7 +155,9 @@ async fn main() -> Result<()> {
     println!("Sandbox resumed");
 
     println!("\nTesting file operations with Python...");
-    let python_file_result = sandbox.run_python(r#"
+    let python_file_result = sandbox
+        .run_python(
+            r#"
 import os
 import json
 from datetime import datetime
@@ -129,12 +184,21 @@ with open(test_file, 'r') as f:
 
 file_size = os.path.getsize(test_file)
 print(f'File size: {file_size} bytes')
-    "#).await?;
+    "#,
+        )
+        .await?;
 
-    println!("Python file operations result:\n{}", python_file_result.stdout);
+    println!(
+        "Python file operations result:\n{}",
+        python_file_result.stdout
+    );
+    assert!(python_file_result.stdout.contains("Created file:"));
+    assert!(python_file_result.error.is_none());
 
     println!("\nTesting file operations with JavaScript...");
-    let js_file_result = sandbox.run_javascript(r#"
+    let js_file_result = sandbox
+        .run_javascript(
+            r#"
 const fs = require('fs');
 const path = require('path');
 
@@ -160,9 +224,16 @@ console.log('File contents:\\n', content);
 
 const stats = fs.statSync(testFile);
 console.log('File size:', stats.size, 'bytes');
-    "#).await?;
+    "#,
+        )
+        .await?;
 
-    println!("JavaScript file operations result:\n{}", js_file_result.stdout);
+    println!(
+        "JavaScript file operations result:\n{}",
+        js_file_result.stdout
+    );
+    assert!(js_file_result.stdout.contains("Created file:"));
+    assert!(js_file_result.error.is_none());
 
     println!("\nCleaning up...");
     sandbox.delete().await?;

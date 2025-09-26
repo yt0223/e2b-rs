@@ -20,10 +20,18 @@ async fn main() -> Result<()> {
                 for template in templates {
                     println!("Template ID: {}", template.template_id);
                     println!("  Name: {}", template.name);
-                    println!("  Description: {}", template.description.as_deref().unwrap_or("No description"));
-                    println!("  Status: {}", if template.public { "Public" } else { "Private" });
-                    println!("  CPU: {} cores, Memory: {} MB, Disk: {} MB",
-                            template.cpu_count, template.memory_mb, template.disk_mb);
+                    println!(
+                        "  Description: {}",
+                        template.description.as_deref().unwrap_or("No description")
+                    );
+                    println!(
+                        "  Status: {}",
+                        if template.public { "Public" } else { "Private" }
+                    );
+                    println!(
+                        "  CPU: {} cores, Memory: {} MB, Disk: {} MB",
+                        template.cpu_count, template.memory_mb, template.disk_mb
+                    );
                     println!("  Created: {}", template.created_at);
                     println!("---");
                 }

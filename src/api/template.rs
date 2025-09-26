@@ -1,7 +1,7 @@
 use crate::{
     client::Client,
     error::{Error, Result},
-    models::{Template, TemplateCreateRequest, TemplateBuild},
+    models::{Template, TemplateBuild, TemplateCreateRequest},
 };
 use reqwest::StatusCode;
 
@@ -35,7 +35,9 @@ impl TemplateApi {
     }
 
     pub async fn get(&self, template_id: &str) -> Result<Template> {
-        let url = self.client.build_url(&format!("/templates/{}", template_id));
+        let url = self
+            .client
+            .build_url(&format!("/templates/{}", template_id));
         let response = self.client.http().get(&url).send().await?;
 
         match response.status() {
@@ -56,13 +58,7 @@ impl TemplateApi {
 
     pub async fn create(&self, request: TemplateCreateRequest) -> Result<TemplateInstance> {
         let url = self.client.build_url("/templates");
-        let response = self
-            .client
-            .http()
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.client.http().post(&url).json(&request).send().await?;
 
         match response.status() {
             StatusCode::CREATED | StatusCode::OK => {
@@ -161,7 +157,10 @@ impl TemplateInstance {
     }
 
     pub async fn rebuild(&self) -> Result<TemplateBuild> {
-        let url = self.api.client.build_url(&format!("/templates/{}/builds", self.template.template_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/templates/{}/builds", self.template.template_id));
         let response = self.api.client.http().post(&url).send().await?;
 
         match response.status() {
@@ -169,7 +168,10 @@ impl TemplateInstance {
                 let build: TemplateBuild = response.json().await?;
                 Ok(build)
             }
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Template {}", self.template.template_id))),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Template {}",
+                self.template.template_id
+            ))),
             status => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(Error::Api {
@@ -181,7 +183,10 @@ impl TemplateInstance {
     }
 
     pub async fn builds(&self) -> Result<Vec<TemplateBuild>> {
-        let url = self.api.client.build_url(&format!("/templates/{}/builds", self.template.template_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/templates/{}/builds", self.template.template_id));
         let response = self.api.client.http().get(&url).send().await?;
 
         match response.status() {
@@ -189,7 +194,10 @@ impl TemplateInstance {
                 let builds: Vec<TemplateBuild> = response.json().await?;
                 Ok(builds)
             }
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Template {}", self.template.template_id))),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Template {}",
+                self.template.template_id
+            ))),
             status => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(Error::Api {
@@ -201,12 +209,18 @@ impl TemplateInstance {
     }
 
     pub async fn delete(self) -> Result<()> {
-        let url = self.api.client.build_url(&format!("/templates/{}", self.template.template_id));
+        let url = self
+            .api
+            .client
+            .build_url(&format!("/templates/{}", self.template.template_id));
         let response = self.api.client.http().delete(&url).send().await?;
 
         match response.status() {
             StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::NotFound(format!("Template {}", self.template.template_id))),
+            StatusCode::NOT_FOUND => Err(Error::NotFound(format!(
+                "Template {}",
+                self.template.template_id
+            ))),
             status => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(Error::Api {

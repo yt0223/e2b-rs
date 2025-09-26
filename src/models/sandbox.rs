@@ -31,6 +31,14 @@ pub struct Sandbox {
     pub cwd: Option<String>,
     #[serde(alias = "envVars")]
     pub env_vars: Option<HashMap<String, String>>,
+    #[serde(alias = "domain")]
+    pub domain: Option<String>,
+    #[serde(alias = "sandboxDomain")]
+    pub sandbox_domain: Option<String>,
+    #[serde(alias = "envdVersion")]
+    pub envd_version: Option<String>,
+    #[serde(alias = "envdAccessToken")]
+    pub envd_access_token: Option<String>,
     #[serde(alias = "cpuCount", default)]
     pub cpu_count: u32,
     #[serde(alias = "memoryMB", default)]
@@ -89,14 +97,27 @@ pub struct ExecutionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxMetrics {
-    pub cpu_usage_percent: f64,
-    pub memory_usage_mb: u64,
-    pub memory_limit_mb: u64,
-    pub disk_usage_mb: u64,
-    pub disk_limit_mb: u64,
-    pub network_rx_bytes: u64,
-    pub network_tx_bytes: u64,
+    pub cpu_count: u32,
+    pub cpu_used_pct: f64,
+    pub disk_total: u64,
+    pub disk_used: u64,
+    pub mem_total: u64,
+    pub mem_used: u64,
     pub timestamp: DateTime<Utc>,
+}
+
+impl Default for SandboxMetrics {
+    fn default() -> Self {
+        Self {
+            cpu_count: 0,
+            cpu_used_pct: 0.0,
+            disk_total: 0,
+            disk_used: 0,
+            mem_total: 0,
+            mem_used: 0,
+            timestamp: Utc::now(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

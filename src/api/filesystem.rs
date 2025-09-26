@@ -1,33 +1,24 @@
 use crate::{
-    client::Client,
     error::{Error, Result},
-    models::{
-        EntryInfo, FileInfo, ReadFormat, ReadResult, WatchHandle, WriteEntry, WriteInfo
-    },
+    models::{EntryInfo, FileInfo, ReadFormat, ReadResult, WatchHandle, WriteEntry, WriteInfo},
     rpc::RpcClient,
 };
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct FilesystemApi {
-    client: Client,
     rpc_client: Option<Arc<RpcClient>>,
-    sandbox_id: String,
 }
 
 impl FilesystemApi {
-    pub fn new(client: Client, sandbox_id: String) -> Self {
-        Self {
-            client,
-            rpc_client: None,
-            sandbox_id,
-        }
+    pub fn new() -> Self {
+        Self { rpc_client: None }
     }
 
-    pub async fn init_rpc(&mut self, envd_url: &str) -> Result<()> {
-        let rpc_client = RpcClient::connect(envd_url).await?;
+    pub async fn init_rpc(&mut self, envd_url: &str, access_token: Option<&str>) -> Result<()> {
+        let rpc_client = RpcClient::connect(envd_url, access_token).await?;
         self.rpc_client = Some(Arc::new(rpc_client));
         Ok(())
     }
@@ -67,15 +58,7 @@ impl FilesystemApi {
 
         match format {
             ReadFormat::Text => Ok(ReadResult::Text(content)),
-            ReadFormat::Binary => {
-                // If we need binary, decode from base64
-                use base64::{Engine, engine::general_purpose};
-                let decoded = general_purpose::STANDARD.decode(&content).map_err(|e| Error::Api {
-                    status: 500,
-                    message: format!("Failed to decode binary content: {}", e),
-                })?;
-                Ok(ReadResult::Binary(decoded))
-            }
+            ReadFormat::Binary => Ok(ReadResult::Binary(content.into_bytes())),
         }
     }
 
@@ -90,96 +73,135 @@ impl FilesystemApi {
     }
 
     pub async fn write(&self, entry: WriteEntry) -> Result<WriteInfo> {
-        let rpc_client = self.get_rpc_client()?;
-
-        let (content, format) = match entry.data {
-            crate::models::WriteData::Text(text) => (text, "text"),
-            crate::models::WriteData::Binary(bytes) => {
-                use base64::{Engine, engine::general_purpose};
-                (general_purpose::STANDARD.encode(bytes), "binary")
-            }
-        };
-
-        let params = json!({
-            "path": entry.path,
-            "content": content,
-            "format": format,
-            "username": "user"
-        });
-
-        let response = rpc_client.filesystem_write(params).await?;
-
-        let path = response["path"].as_str()
-            .ok_or_else(|| Error::Api {
-                status: 500,
-                message: "Invalid response: missing path".to_string(),
-            })?;
-
-        let size = response["size"].as_u64()
-            .ok_or_else(|| Error::Api {
-                status: 500,
-                message: "Invalid response: missing size".to_string(),
-            })?;
-
-        Ok(WriteInfo {
-            path: path.to_string(),
-            size,
+        let entries = vec![entry];
+        let mut results = self.upload_files(&entries).await?;
+        results.pop().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Write operation returned no result".to_string(),
         })
     }
 
     pub async fn write_files(&self, entries: Vec<WriteEntry>) -> Result<Vec<WriteInfo>> {
-        let rpc_client = self.get_rpc_client()?;
-
-        let files: Vec<Value> = entries.into_iter().map(|entry| {
-            let (content, format) = match entry.data {
-                crate::models::WriteData::Text(text) => (text, "text"),
-                crate::models::WriteData::Binary(bytes) => {
-                    use base64::{Engine, engine::general_purpose};
-                    (general_purpose::STANDARD.encode(bytes), "binary")
-                }
-            };
-
-            json!({
-                "path": entry.path,
-                "content": content,
-                "format": format
-            })
-        }).collect();
-
-        let params = json!({
-            "files": files,
-            "username": "user"
-        });
-
-        let response = rpc_client.filesystem_write(params).await?;
-
-        let results = response.as_array()
-            .ok_or_else(|| Error::Api {
-                status: 500,
-                message: "Invalid response format".to_string(),
-            })?;
-
-        let mut write_infos = Vec::new();
-        for result in results {
-            let path = result["path"].as_str()
-                .ok_or_else(|| Error::Api {
-                    status: 500,
-                    message: "Invalid response: missing path".to_string(),
-                })?;
-
-            let size = result["size"].as_u64()
-                .ok_or_else(|| Error::Api {
-                    status: 500,
-                    message: "Invalid response: missing size".to_string(),
-                })?;
-
-            write_infos.push(WriteInfo {
-                path: path.to_string(),
-                size,
-            });
+        if entries.is_empty() {
+            return Ok(Vec::new());
         }
+        self.upload_files(&entries).await
+    }
 
-        Ok(write_infos)
+    async fn upload_files(&self, entries: &[WriteEntry]) -> Result<Vec<WriteInfo>> {
+        let rpc_client = self.get_rpc_client()?;
+        rpc_client.filesystem_upload(entries, "user").await
+    }
+
+    fn parse_entry_info(value: &Value) -> Result<EntryInfo> {
+        let entry = value.as_object().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Invalid entry format".to_string(),
+        })?;
+
+        let path = entry
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let entry_type = entry
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("FILE_TYPE_FILE");
+        let is_dir = entry_type == "FILE_TYPE_DIRECTORY";
+        let size = Self::parse_size(entry.get("size"));
+        let modified_at = Self::parse_timestamp(entry.get("modifiedTime"));
+        let permissions = entry
+            .get("permissions")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(EntryInfo {
+            path,
+            name,
+            is_dir,
+            size,
+            created_at: modified_at,
+            updated_at: modified_at,
+            permissions,
+        })
+    }
+
+    fn parse_file_info(entry: &serde_json::Map<String, Value>) -> Result<FileInfo> {
+        let path = entry
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let entry_type = entry
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("FILE_TYPE_FILE");
+        let is_dir = entry_type == "FILE_TYPE_DIRECTORY";
+        let size = Self::parse_size(entry.get("size"));
+        let modified_at = Self::parse_timestamp(entry.get("modifiedTime"));
+        let created_at = entry
+            .get("createdTime")
+            .map(|v| Self::parse_timestamp(Some(v)))
+            .unwrap_or(modified_at);
+        let permissions = entry.get("mode").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let owner = entry
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let group = entry
+            .get("group")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(FileInfo {
+            path,
+            name,
+            size,
+            is_dir,
+            created_at,
+            modified_at,
+            permissions,
+            owner,
+            group,
+        })
+    }
+
+    fn parse_size(value: Option<&Value>) -> u64 {
+        if let Some(v) = value {
+            if let Some(n) = v.as_u64() {
+                return n;
+            }
+            if let Some(s) = v.as_str() {
+                return s.parse().unwrap_or(0);
+            }
+            if let Some(n) = v.as_i64() {
+                return n.max(0) as u64;
+            }
+        }
+        0
+    }
+
+    fn parse_timestamp(value: Option<&Value>) -> DateTime<Utc> {
+        if let Some(Value::String(s)) = value {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                return dt.with_timezone(&Utc);
+            }
+        }
+        Utc::now()
     }
 
     pub async fn list(&self, path: &str) -> Result<Vec<EntryInfo>> {
@@ -191,40 +213,13 @@ impl FilesystemApi {
         });
 
         let response = rpc_client.filesystem_list(params).await?;
-        let entries = response["entries"].as_array()
-            .ok_or_else(|| Error::Api {
-                status: 500,
-                message: "Invalid response format: missing entries".to_string(),
-            })?;
+        tracing::debug!("filesystem list response: {}", response);
+        let entries = response["entries"].as_array().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Invalid response format: missing entries".to_string(),
+        })?;
 
-        let mut result = Vec::new();
-        for entry in entries {
-            let path = entry["path"].as_str().unwrap_or("").to_string();
-            let name = entry["name"].as_str().unwrap_or("").to_string();
-            let is_dir = entry["is_dir"].as_bool().unwrap_or(false);
-            let size = entry["size"].as_u64().unwrap_or(0);
-            let created_at = entry["created_at"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
-            let updated_at = entry["updated_at"].as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now);
-            let permissions = entry["permissions"].as_str().unwrap_or("").to_string();
-
-            result.push(EntryInfo {
-                path,
-                name,
-                is_dir,
-                size,
-                created_at,
-                updated_at,
-                permissions,
-            });
-        }
-
-        Ok(result)
+        entries.iter().map(Self::parse_entry_info).collect()
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool> {
@@ -250,34 +245,14 @@ impl FilesystemApi {
         });
 
         let response = rpc_client.filesystem_stat(params).await?;
+        tracing::debug!("filesystem stat response: {}", response);
 
-        let path = response["path"].as_str().unwrap_or("").to_string();
-        let name = response["name"].as_str().unwrap_or("").to_string();
-        let size = response["size"].as_u64().unwrap_or(0);
-        let is_dir = response["is_dir"].as_bool().unwrap_or(false);
-        let created_at = response["created_at"].as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
-        let modified_at = response["modified_at"].as_str()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
-        let permissions = response["permissions"].as_u64().unwrap_or(0) as u32;
-        let owner = response["owner"].as_str().unwrap_or("").to_string();
-        let group = response["group"].as_str().unwrap_or("").to_string();
+        let entry = response["entry"].as_object().ok_or_else(|| Error::Api {
+            status: 500,
+            message: "Invalid response format: missing entry".to_string(),
+        })?;
 
-        Ok(FileInfo {
-            path,
-            name,
-            size,
-            is_dir,
-            created_at,
-            modified_at,
-            permissions,
-            owner,
-            group,
-        })
+        Self::parse_file_info(entry)
     }
 
     pub async fn remove(&self, path: &str) -> Result<()> {
@@ -296,12 +271,15 @@ impl FilesystemApi {
         let rpc_client = self.get_rpc_client()?;
 
         let params = json!({
-            "from": from,
-            "to": to,
+            "source": from,
+            "destination": to,
             "username": "user"
         });
 
-        rpc_client.filesystem_move(params).await?;
+        let response = rpc_client.filesystem_move(params).await?;
+        tracing::debug!("filesystem move response: {}", response);
+        let entry = response["entry"].clone();
+        Self::parse_entry_info(&entry)?;
         Ok(())
     }
 

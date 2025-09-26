@@ -36,7 +36,7 @@ pub use client::Client;
 pub use error::{Error, Result};
 
 pub mod prelude {
-    pub use crate::{Client, Error, Result};
     pub use crate::api::{CommandsApi, FilesystemApi, SandboxApi, TemplateApi};
     pub use crate::models::*;
+    pub use crate::{Client, Error, Result};
 }

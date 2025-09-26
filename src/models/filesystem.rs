@@ -15,7 +15,11 @@ pub struct EntryInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteInfo {
     pub path: String,
-    pub size: u64,
+    pub name: String,
+    #[serde(rename = "type", default)]
+    pub entry_type: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +87,13 @@ pub struct WatchHandle {
 }
 
 impl WatchHandle {
-    pub fn new(path: String) -> (Self, tokio::sync::mpsc::Sender<FilesystemEvent>, tokio::sync::oneshot::Receiver<()>) {
+    pub fn new(
+        path: String,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Sender<FilesystemEvent>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
         let (event_sender, event_receiver) = tokio::sync::mpsc::channel(100);
         let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
 

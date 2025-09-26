@@ -1,33 +1,28 @@
 use crate::{
-    client::Client,
     error::{Error, Result},
-    models::{CommandHandle, CommandOptions, CommandResult, ProcessInfo},
+    models::{CommandHandle, CommandOptions, CommandOutput, CommandResult, ProcessInfo},
     rpc::RpcClient,
 };
-use base64::{Engine, engine::general_purpose};
+use base64::{engine::general_purpose, Engine};
+use chrono::Utc;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CommandsApi {
-    client: Client,
     rpc_client: Option<Arc<RpcClient>>,
-    sandbox_id: String,
 }
 
 impl CommandsApi {
-    pub fn new(client: Client, sandbox_id: String) -> Self {
-        Self {
-            client,
-            rpc_client: None,
-            sandbox_id,
-        }
+    pub fn new() -> Self {
+        Self { rpc_client: None }
     }
 
-    pub async fn init_rpc(&mut self, envd_url: &str) -> Result<()> {
-        let rpc_client = RpcClient::connect(envd_url).await?;
+    pub async fn init_rpc(&mut self, envd_url: &str, access_token: Option<&str>) -> Result<()> {
+        let rpc_client = RpcClient::connect(envd_url, access_token).await?;
         self.rpc_client = Some(Arc::new(rpc_client));
         Ok(())
     }
@@ -43,7 +38,11 @@ impl CommandsApi {
         self.run_with_options(cmd, &CommandOptions::default()).await
     }
 
-    pub async fn run_with_timeout(&self, cmd: &str, timeout_duration: Duration) -> Result<CommandResult> {
+    pub async fn run_with_timeout(
+        &self,
+        cmd: &str,
+        timeout_duration: Duration,
+    ) -> Result<CommandResult> {
         let options = CommandOptions {
             timeout: Some(timeout_duration),
             ..Default::default()
@@ -59,7 +58,11 @@ impl CommandsApi {
         self.run_background_with_options(cmd, &options).await
     }
 
-    pub async fn run_with_options(&self, cmd: &str, options: &CommandOptions) -> Result<CommandResult> {
+    pub async fn run_with_options(
+        &self,
+        cmd: &str,
+        options: &CommandOptions,
+    ) -> Result<CommandResult> {
         if options.background {
             return Err(Error::Api {
                 status: 400,
@@ -76,25 +79,18 @@ impl CommandsApi {
         }
     }
 
-    pub async fn run_background_with_options(&self, cmd: &str, options: &CommandOptions) -> Result<CommandHandle> {
+    pub async fn run_background_with_options(
+        &self,
+        cmd: &str,
+        options: &CommandOptions,
+    ) -> Result<CommandHandle> {
         self.start_command(cmd, options).await
     }
 
     async fn execute_command(&self, cmd: &str, options: &CommandOptions) -> Result<CommandResult> {
         let rpc_client = self.get_rpc_client()?;
 
-        // For complex commands with shell features, use sh -c
-        let (command, args) = if cmd.contains(&['>', '<', '|', '&', ';', '(', ')', '{', '}', '$', '`', '"', '\''][..]) {
-            ("sh".to_string(), vec!["-c".to_string(), cmd.to_string()])
-        } else {
-            // Simple command splitting for basic commands
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if parts.is_empty() {
-                (cmd.to_string(), Vec::new())
-            } else {
-                (parts[0].to_string(), parts[1..].iter().map(|s| s.to_string()).collect())
-            }
-        };
+        let (command, args) = Self::build_shell_command(cmd);
 
         // StartRequest has a ProcessConfig field named "process"
         let params = json!({
@@ -121,11 +117,12 @@ impl CommandsApi {
                 crate::rpc::ProcessEventData::Data { data } => {
                     if let Some(stdout_data) = &data.stdout {
                         // Decode Base64 stdout data
-                        let decoded = general_purpose::STANDARD
-                            .decode(stdout_data)
-                            .map_err(|e| Error::Api {
-                                status: 500,
-                                message: format!("Failed to decode stdout: {}", e),
+                        let decoded =
+                            general_purpose::STANDARD.decode(stdout_data).map_err(|e| {
+                                Error::Api {
+                                    status: 500,
+                                    message: format!("Failed to decode stdout: {}", e),
+                                }
                             })?;
                         let text = String::from_utf8(decoded).map_err(|e| Error::Api {
                             status: 500,
@@ -135,11 +132,12 @@ impl CommandsApi {
                     }
                     if let Some(stderr_data) = &data.stderr {
                         // Decode Base64 stderr data
-                        let decoded = general_purpose::STANDARD
-                            .decode(stderr_data)
-                            .map_err(|e| Error::Api {
-                                status: 500,
-                                message: format!("Failed to decode stderr: {}", e),
+                        let decoded =
+                            general_purpose::STANDARD.decode(stderr_data).map_err(|e| {
+                                Error::Api {
+                                    status: 500,
+                                    message: format!("Failed to decode stderr: {}", e),
+                                }
                             })?;
                         let text = String::from_utf8(decoded).map_err(|e| Error::Api {
                             status: 500,
@@ -176,18 +174,7 @@ impl CommandsApi {
     async fn start_command(&self, cmd: &str, options: &CommandOptions) -> Result<CommandHandle> {
         let rpc_client = self.get_rpc_client()?;
 
-        // For complex commands with shell features, use sh -c
-        let (command, args) = if cmd.contains(&['>', '<', '|', '&', ';', '(', ')', '{', '}', '$', '`', '"', '\''][..]) {
-            ("sh".to_string(), vec!["-c".to_string(), cmd.to_string()])
-        } else {
-            // Simple command splitting for basic commands
-            let parts: Vec<&str> = cmd.split_whitespace().collect();
-            if parts.is_empty() {
-                (cmd.to_string(), Vec::new())
-            } else {
-                (parts[0].to_string(), parts[1..].iter().map(|s| s.to_string()).collect())
-            }
-        };
+        let (command, args) = Self::build_shell_command(cmd);
 
         // StartRequest has a ProcessConfig field named "process"
         let params = json!({
@@ -205,14 +192,87 @@ impl CommandsApi {
         while let Some(event) = stream.next_event().await? {
             match event.event {
                 crate::rpc::ProcessEventData::Start { start } => {
-                    return Ok(CommandHandle::new(start.pid));
+                    let pid = start.pid;
+
+                    let (stdout_tx, stdout_rx) = mpsc::channel(100);
+                    let (stderr_tx, stderr_rx) = mpsc::channel(100);
+                    let (result_tx, result_rx) = oneshot::channel();
+
+                    let mut stream = stream;
+                    tokio::spawn(async move {
+                        let stdout_sender = stdout_tx;
+                        let stderr_sender = stderr_tx;
+                        let mut stdout_acc = String::new();
+                        let mut stderr_acc = String::new();
+                        let mut exit_code = None;
+                        let mut execution_time = None;
+
+                        while let Ok(Some(event)) = stream.next_event().await {
+                            match event.event {
+                                crate::rpc::ProcessEventData::Data { data } => {
+                                    if let Some(stdout_data) = data.stdout.as_ref() {
+                                        if let Ok(decoded) =
+                                            general_purpose::STANDARD.decode(stdout_data)
+                                        {
+                                            if let Ok(text) = String::from_utf8(decoded.clone()) {
+                                                stdout_acc.push_str(&text);
+                                                let _ = stdout_sender
+                                                    .send(CommandOutput {
+                                                        data: text,
+                                                        timestamp: Utc::now(),
+                                                    })
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                    if let Some(stderr_data) = data.stderr.as_ref() {
+                                        if let Ok(decoded) =
+                                            general_purpose::STANDARD.decode(stderr_data)
+                                        {
+                                            if let Ok(text) = String::from_utf8(decoded.clone()) {
+                                                stderr_acc.push_str(&text);
+                                                let _ = stderr_sender
+                                                    .send(CommandOutput {
+                                                        data: text,
+                                                        timestamp: Utc::now(),
+                                                    })
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+                                crate::rpc::ProcessEventData::End { end } => {
+                                    if end.exited {
+                                        exit_code = end.exit_code.or_else(|| {
+                                            if end.status.contains("exit status") {
+                                                end.status
+                                                    .split("exit status ")
+                                                    .nth(1)
+                                                    .and_then(|s| s.trim().parse().ok())
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    }
+                                    execution_time = None;
+                                    break;
+                                }
+                                crate::rpc::ProcessEventData::Start { .. } => {}
+                            }
+                        }
+
+                        let _ = result_tx.send(CommandResult {
+                            stdout: stdout_acc,
+                            stderr: stderr_acc,
+                            exit_code: exit_code.unwrap_or(-1),
+                            execution_time,
+                        });
+                    });
+
+                    return Ok(CommandHandle::new(pid, stdout_rx, stderr_rx, result_rx));
                 }
-                crate::rpc::ProcessEventData::Data { .. } => {
-                    // Skip data events when starting background process
-                    continue;
-                }
+                crate::rpc::ProcessEventData::Data { .. } => continue,
                 crate::rpc::ProcessEventData::End { .. } => {
-                    // Process ended immediately, this might be an error
                     return Err(Error::Api {
                         status: 500,
                         message: "Process ended immediately after start".to_string(),
@@ -303,12 +363,6 @@ impl CommandsApi {
         })
     }
 
-    async fn wait_for_command_with_timeout(&self, handle: CommandHandle, timeout_duration: Duration) -> Result<CommandResult> {
-        timeout(timeout_duration, self.wait_for_command(handle))
-            .await
-            .map_err(|_| Error::Timeout)?
-    }
-
     pub async fn list(&self) -> Result<Vec<ProcessInfo>> {
         let rpc_client = self.get_rpc_client()?;
 
@@ -337,13 +391,22 @@ impl CommandsApi {
             let pid = process["pid"].as_u64().unwrap_or(0) as u32;
             let config = &process["config"];
             let cmd = config["cmd"].as_str().unwrap_or("").to_string();
-            let args = config["args"].as_array()
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+            let args = config["args"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .collect()
+                })
                 .unwrap_or_default();
-            let envs = config["envs"].as_object()
-                .map(|obj| obj.iter().filter_map(|(k, v)| {
-                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                }).collect())
+            let envs = config["envs"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
                 .unwrap_or_default();
             let cwd = config["cwd"].as_str().map(|s| s.to_string());
             let tag = process["tag"].as_str().map(|s| s.to_string());
@@ -368,7 +431,7 @@ impl CommandsApi {
             "process": {
                 "pid": pid
             },
-            "signal": "SIGKILL"
+            "signal": "SIGNAL_SIGKILL"
         });
 
         match rpc_client.process_send_signal(params).await {
@@ -399,6 +462,13 @@ impl CommandsApi {
 
     pub async fn connect(&self, pid: u32) -> Result<CommandHandle> {
         // For HTTP-based implementation, connect just returns a handle to the existing process
-        Ok(CommandHandle::new(pid))
+        Ok(CommandHandle::from_pid(pid))
+    }
+
+    fn build_shell_command(cmd: &str) -> (String, Vec<String>) {
+        (
+            "/bin/bash".to_string(),
+            vec!["-l".to_string(), "-c".to_string(), cmd.to_string()],
+        )
     }
 }

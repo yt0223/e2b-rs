@@ -37,7 +37,8 @@ ENV PATH=$PATH:/app/node_modules/.bin
 CMD ["node", "--version"]
 "#;
 
-    match client.template()
+    match client
+        .template()
         .name("nodejs-18")
         .description("Node.js 18 with common development tools and packages")
         .dockerfile(dockerfile.to_string())
@@ -48,7 +49,14 @@ CMD ["node", "--version"]
             println!("✅ Template created successfully!");
             println!("Template ID: {}", template_instance.id());
             println!("Name: {}", template_instance.template().name);
-            println!("Description: {}", template_instance.template().description.as_deref().unwrap_or("No description"));
+            println!(
+                "Description: {}",
+                template_instance
+                    .template()
+                    .description
+                    .as_deref()
+                    .unwrap_or("No description")
+            );
 
             // Now trigger a build
             match template_instance.rebuild().await {
@@ -64,9 +72,15 @@ CMD ["node", "--version"]
 
             println!("\n📋 Next steps:");
             println!("1. Wait for the build to complete (check E2B dashboard)");
-            println!("2. Use template ID '{}' for Node.js specific environments", template_instance.id());
+            println!(
+                "2. Use template ID '{}' for Node.js specific environments",
+                template_instance.id()
+            );
             println!("3. Example usage:");
-            println!("   let sandbox = client.sandbox().template(\"{}\").create().await?;", template_instance.id());
+            println!(
+                "   let sandbox = client.sandbox().template(\"{}\").create().await?;",
+                template_instance.id()
+            );
             println!("\n💡 Note: For multi-language code execution (Python + JavaScript), consider using:");
             println!("   let sandbox = client.sandbox().template(\"code-interpreter-v1\").create().await?;");
 

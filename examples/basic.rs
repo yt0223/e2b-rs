@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
     println!("Creating sandbox with code interpreter...");
     let sandbox = client
         .sandbox()
-        .template("code-interpreter-v1")  // Use code interpreter for multi-language support
+        .template("code-interpreter-v1") // Use code interpreter for multi-language support
         .metadata(json!({"example": "basic"}))
         .timeout(300)
         .create()
@@ -20,7 +20,9 @@ async fn main() -> Result<()> {
     println!("Sandbox created: {}", sandbox.id());
 
     println!("Running Python code...");
-    let python_result = sandbox.run_python(r#"
+    let python_result = sandbox
+        .run_python(
+            r#"
 print("Hello from Python in E2B!")
 import sys
 print(f"Python version: {sys.version}")
@@ -29,15 +31,25 @@ print(f"Python version: {sys.version}")
 result = 2 + 2
 print(f"2 + 2 = {result}")
 result
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("Python output:\n{}", python_result.stdout);
     if !python_result.stderr.is_empty() {
         println!("Python stderr: {}", python_result.stderr);
     }
+    assert!(python_result.stdout.contains("Hello from Python"));
+    assert!(python_result.stdout.contains("2 + 2 = 4"));
+    assert!(
+        python_result.error.is_none(),
+        "Python execution should not error"
+    );
 
     println!("\nRunning JavaScript code...");
-    let js_result = sandbox.run_javascript(r#"
+    let js_result = sandbox
+        .run_javascript(
+            r#"
 console.log("Hello from JavaScript in E2B!");
 console.log("Node version:", process.version);
 
@@ -55,19 +67,31 @@ console.log('File content:', content);
 
 // Return result
 2 + 2;
-    "#).await?;
+    "#,
+        )
+        .await?;
 
     println!("JavaScript output:\n{}", js_result.stdout);
     if !js_result.stderr.is_empty() {
         println!("JavaScript stderr: {}", js_result.stderr);
     }
+    assert!(js_result.stdout.contains("Hello from JavaScript"));
+    assert!(js_result.stdout.contains("File content"));
+    assert!(
+        js_result.error.is_none(),
+        "JavaScript execution should not error"
+    );
 
     println!("\nRunning code with explicit language parameter...");
-    let param_result = sandbox.run_code_with_language(
-        "print('This is Python code executed with language parameter')",
-        "python"
-    ).await?;
+    let param_result = sandbox
+        .run_code_with_language(
+            "print('This is Python code executed with language parameter')",
+            "python",
+        )
+        .await?;
     println!("Language parameter result:\n{}", param_result.stdout);
+    assert!(param_result.stdout.contains("This is Python code"));
+    assert!(param_result.error.is_none());
 
     println!("\nDeleting sandbox...");
     sandbox.delete().await?;
