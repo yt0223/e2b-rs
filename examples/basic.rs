@@ -1,17 +1,14 @@
 use e2b::prelude::*;
 use serde_json::json;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging to see debug output
-    tracing_subscriber::fmt::init();
     let client = Client::new()?;
 
     println!("Creating sandbox with code interpreter...");
     let sandbox = client
         .sandbox()
-        .template("code-interpreter-v1") // Use code interpreter for multi-language support
+        .template("code-interpreter-v1")
         .metadata(json!({"example": "basic"}))
         .timeout(300)
         .create()
@@ -19,7 +16,7 @@ async fn main() -> Result<()> {
 
     println!("Sandbox created: {}", sandbox.id());
 
-    println!("Running Python code...");
+    println!("\nRunning Python code...");
     let python_result = sandbox
         .run_python(
             r#"
@@ -27,24 +24,13 @@ print("Hello from Python in E2B!")
 import sys
 print(f"Python version: {sys.version}")
 
-# Simple calculation
 result = 2 + 2
 print(f"2 + 2 = {result}")
-result
     "#,
         )
         .await?;
 
-    println!("Python output:\n{}", python_result.stdout);
-    if !python_result.stderr.is_empty() {
-        println!("Python stderr: {}", python_result.stderr);
-    }
-    assert!(python_result.stdout.contains("Hello from Python"));
-    assert!(python_result.stdout.contains("2 + 2 = 4"));
-    assert!(
-        python_result.error.is_none(),
-        "Python execution should not error"
-    );
+    println!("Output:\n{}", python_result.stdout);
 
     println!("\nRunning JavaScript code...");
     let js_result = sandbox
@@ -53,49 +39,17 @@ result
 console.log("Hello from JavaScript in E2B!");
 console.log("Node version:", process.version);
 
-// File operations
-const fs = require('fs');
-const data = {
-    message: 'Hello World',
-    timestamp: new Date().toISOString(),
-    platform: process.platform
-};
-
-fs.writeFileSync('/tmp/test.json', JSON.stringify(data, null, 2));
-const content = fs.readFileSync('/tmp/test.json', 'utf8');
-console.log('File content:', content);
-
-// Return result
-2 + 2;
+const result = 2 + 2;
+console.log(`2 + 2 = ${result}`);
     "#,
         )
         .await?;
 
-    println!("JavaScript output:\n{}", js_result.stdout);
-    if !js_result.stderr.is_empty() {
-        println!("JavaScript stderr: {}", js_result.stderr);
-    }
-    assert!(js_result.stdout.contains("Hello from JavaScript"));
-    assert!(js_result.stdout.contains("File content"));
-    assert!(
-        js_result.error.is_none(),
-        "JavaScript execution should not error"
-    );
-
-    println!("\nRunning code with explicit language parameter...");
-    let param_result = sandbox
-        .run_code_with_language(
-            "print('This is Python code executed with language parameter')",
-            "python",
-        )
-        .await?;
-    println!("Language parameter result:\n{}", param_result.stdout);
-    assert!(param_result.stdout.contains("This is Python code"));
-    assert!(param_result.error.is_none());
+    println!("Output:\n{}", js_result.stdout);
 
     println!("\nDeleting sandbox...");
     sandbox.delete().await?;
-    println!("Cleanup completed!");
+    println!("Done!");
 
     Ok(())
 }

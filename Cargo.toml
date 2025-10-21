@@ -40,16 +40,20 @@ name = "basic"
 path = "examples/basic.rs"
 
 [[example]]
-name = "sandbox"
-path = "examples/sandbox.rs"
+name = "code_interpreter"
+path = "examples/code_interpreter.rs"
 
 [[example]]
-name = "commands_demo"
-path = "examples/commands_demo.rs"
+name = "simple_python"
+path = "examples/simple_python.rs"
 
 [[example]]
-name = "filesystem_demo"
-path = "examples/filesystem_demo.rs"
+name = "simple_javascript"
+path = "examples/simple_javascript.rs"
+
+[[example]]
+name = "simple_commands"
+path = "examples/simple_commands.rs"
 
 [[example]]
 name = "list_templates"
@@ -58,7 +62,3 @@ path = "examples/list_templates.rs"
 [[example]]
 name = "create_nodejs_template"
 path = "examples/create_nodejs_template.rs"
-
-[[example]]
-name = "code_interpreter"
-path = "examples/code_interpreter.rs"
